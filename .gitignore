@@ -11,8 +11,7 @@ __pycache__/
 env/
 venv/
 
-# User config & generated data
-key_config.json
+# Generated data & cache
 logs/
 models/
 screenshots/

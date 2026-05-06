@@ -1,0 +1,11 @@
+{
+  "up": "w",
+  "down": "s",
+  "left": "a",
+  "right": "d",
+  "jump": "space",
+  "dash": "shift",
+  "spell_right": "e",
+  "spell_left": "q",
+  "shoot": "left"
+}

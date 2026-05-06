@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# User config & generated data
+key_config.json
+logs/
+models/
+screenshots/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

@@ -1,0 +1,18 @@
+# 核心依赖（必须）
+torch>=1.9.0
+numpy>=1.20.0
+opencv-python>=4.5.0
+mss>=6.1.0
+gymnasium>=0.28.0
+
+# 输入模拟（至少安装一个）
+pydirectinput>=1.0.4  # Windows DirectInput模拟（推荐）
+# pyautogui>=0.9.50   # 备选方案
+
+# Windows窗口检测（必须，用于自动查找游戏窗口）
+pywin32>=227; platform_system=="Windows"
+
+# 可选依赖
+pillow>=8.0.0          # 图像处理增强
+tensorboard>=2.8.0     # 训练可视化
+matplotlib>=3.3.0      # 绘图

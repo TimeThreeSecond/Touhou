@@ -26,6 +26,7 @@ for d in [LOG_DIR, MODEL_DIR, SCREENSHOT_DIR]:
 GAME_WINDOW = {
     "exe_name": "Touhou Hero of Ice Fairy.exe",
     "title": "Touhou Hero of Ice Fairy",
+    # fallback 包含中英文，但实际匹配后会通过进程路径验证排除误匹配
     "fallback_titles": ["东方冰之勇者记", "Touhou"],
     # 游戏画面区域（相对于屏幕的坐标，用于截图）
     # 如果不知道具体坐标，可以先运行 utils.py 自动检测
@@ -46,48 +47,64 @@ VISION = {
 
 # ==========================================
 # UI检测区域配置（基于实际战斗画面截图）
-# 截图分辨率: 2560x1600（用户提供的截图）
-# 这些坐标需要根据实际游戏窗口分辨率按比例缩放
+# 基准截图分辨率: 1600×900（无黑边，全屏/无边框全屏）
+# 使用相对坐标（百分比），自动适配不同分辨率
+# 参考UI检测报告: 东方冰之勇者记_UI检测报告.md
 # ==========================================
 UI_DETECTION = {
     # 玩家雪花血量区域（左上角）
-    # 画面显示6个蓝色雪花图标表示血量
+    # 实际位置(1600×900): x=128~462, y=50~114
+    # 左侧有等级钻石图标(x=50~106)，已排除在区域外
+    # 6个蓝色雪花，间距不均匀(58~62px)，单图标约60×55px
     "health_snowflakes": {
-        "x_start": 0.035, "x_end": 0.20,
-        "y_start": 0.03, "y_end": 0.10,
-        "max_health": 6,           # 最大6个雪花
-        "color_hint": "blue",      # 蓝色雪花
+        "x_start": 0.08, "x_end": 0.29,
+        "y_start": 0.055, "y_end": 0.127,
+        "max_health": 6,
+        "color_hint": "blue",
     },
-    # 体力条区域（雪花下方黄色条）
-    # 注意: 不同分辨率下位置可能有偏移，区域设置较宽以覆盖各种情况
+    # 体力条区域（雪花下方金黄色条）
+    # 实际位置(1600×900): x=145~464, y=128~139
+    # 总槽宽约310px, 填充色RGB≈(244,200,91), 两端直角
     "stamina_bar": {
-        "x_start": 0.06, "x_end": 0.25,
-        "y_start": 0.11, "y_end": 0.16,
-        "color_hint": "yellow",    # 黄色体力条
+        "x_start": 0.09, "x_end": 0.29,
+        "y_start": 0.14, "y_end": 0.16,
+        "color_hint": "yellow",
     },
     # Boss血条区域（右上角红色长条）
-    # 注意: 包含白色边框，区域设置较宽
+    # 实际位置(1600×900): x=955~1372, y=86~125
+    # 左侧尖角/斜切，右侧平齐，含白色边框
+    # 红色填充RGB≈(255,0,48)~(255,119,123)，空槽为白色
     "boss_health_bar": {
-        "x_start": 0.58, "x_end": 0.88,
-        "y_start": 0.06, "y_end": 0.13,
-        "color_hint": "red",       # 红色血条
+        "x_start": 0.595, "x_end": 0.86,
+        "y_start": 0.095, "y_end": 0.14,
+        "color_hint": "red",
     },
-    # Boss阶段文字区域（Stage 1/6）
+    # Boss阶段/技能文字区域（血条下方）
+    # 实际位置(1600×900): Stage 1/6红色字 x=960~1150, y=95~115
+    # Boss名称底板 x=1185~1382, y=48~73
     "boss_stage": {
-        "x_start": 0.65, "x_end": 0.75,
-        "y_start": 0.09, "y_end": 0.14,
+        "x_start": 0.60, "x_end": 0.86,
+        "y_start": 0.05, "y_end": 0.13,
     },
-    # 符卡就绪状态区域（左侧READY图标）
+    # 符卡就绪状态区域（左侧纵向排列）
+    # 实际位置(1600×900): x=31~179, y=170~368
+    # 2张卡上下排列，单卡约70×90px
+    # READY文字RGB≈(255,240,224)黄色描边字
     "spell_ready": {
-        "x_start": 0.01, "x_end": 0.12,
-        "y_start": 0.22, "y_end": 0.40,
-        "color_hint": "ready_text", # READY字样
+        "x_start": 0.019, "x_end": 0.112,
+        "y_start": 0.19, "y_end": 0.41,
+        "color_hint": "ready_text",
     },
     # 战斗时长区域（左下角）
+    # 实际位置(1600×900): x=57~260, y=824~843
+    # 浅灰色字RGB≈(194,188,193)，透明背景
     "battle_timer": {
-        "x_start": 0.02, "x_end": 0.18,
-        "y_start": 0.88, "y_end": 0.97,
+        "x_start": 0.035, "x_end": 0.165,
+        "y_start": 0.915, "y_end": 0.94,
     },
+    # 物品栏（右下角）— 仅用于参考，当前未用于状态检测
+    # 实际位置(1600×900): x=1294~1539, y=820~866
+    # 7个横向等距槽位，圆角矩形边框
 }
 
 # ==========================================
@@ -132,7 +149,7 @@ REWARD = {
 
     # ---- 攻击相关 ----
     "shoot_reward": 0.02,          # 每帧持续射击的微小奖励（鼓励输出）
-    "spell_use_reward": 0.5,       # 使用符卡的奖励（鼓励技能使用）
+    "spell_use_reward": -0.05,     # 使用符卡的微小惩罚（防止无脑spam）
 
     # ---- 体力管理 ----
     "stamina_low_penalty": -0.1,   # 体力过低时的惩罚（无法冲刺）
@@ -207,8 +224,7 @@ def load_key_mapping():
             empty_keys = [k for k, v in user_config.items() if not v]
             if empty_keys:
                 print(f"[警告] 以下按键未配置: {', '.join(empty_keys)}")
-            else:
-                print(f"[信息] 已加载自定义按键配置: {CONFIG_FILE}")
+            print(f"[信息] 已加载自定义按键配置: {CONFIG_FILE}")
             return user_config
         except Exception as e:
             print(f"[警告] 加载按键配置失败: {e}")

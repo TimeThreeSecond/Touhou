@@ -18,6 +18,16 @@ class GameCapture:
     """游戏画面捕获"""
 
     def __init__(self, region=None):
+        # 设置 DPI aware，防止 Windows 显示缩放导致截图坐标偏移
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+        
         self.sct = mss.MSS()
         self.region = region or self._find_game_window()
         if self.region is None:
@@ -26,40 +36,70 @@ class GameCapture:
             print("[提示] 方法2: 在 config.py 中手动设置 GAME_WINDOW['region']")
 
     def _find_game_window_pywin32(self):
-        """使用 pywin32 查找游戏窗口"""
+        """使用 pywin32 查找游戏窗口，返回精确的客户区屏幕坐标"""
         import win32gui
 
-        result = {}
+        candidates = []
+        # 标题黑名单：排除文件资源管理器、IDE 等常见非游戏窗口
+        title_blacklist = ["文件资源管理器", "explorer", "visual studio", "pycharm", "code", "cmd", "powershell"]
+        game_titles = [GAME_WINDOW["title"]] + GAME_WINDOW.get("fallback_titles", [])
 
         def enum_callback(hwnd, extra):
-            nonlocal result
-            if win32gui.IsWindowVisible(hwnd):
-                title = win32gui.GetWindowText(hwnd)
-                for t in [GAME_WINDOW["title"]] + GAME_WINDOW["fallback_titles"]:
-                    if t.lower() in title.lower():
-                        rect = win32gui.GetWindowRect(hwnd)
-                        left, top, right, bottom = rect
-                        result = {
-                            "left": left,
-                            "top": top,
-                            "width": right - left,
-                            "height": bottom - top,
-                            "title": title,
-                            "hwnd": hwnd,
-                        }
-                        return False
+            if not win32gui.IsWindowVisible(hwnd):
+                return True
+            title = win32gui.GetWindowText(hwnd)
+            # 黑名单过滤
+            lower_title = title.lower()
+            if any(bad in lower_title for bad in title_blacklist):
+                return True
+            # 标题匹配
+            for t in game_titles:
+                if t.lower() in lower_title:
+                    # 获取客户区大小
+                    client_rect = win32gui.GetClientRect(hwnd)
+                    client_w = client_rect[2] - client_rect[0]
+                    client_h = client_rect[3] - client_rect[1]
+                    # 尺寸过滤：排除过小窗口（弹窗、任务栏图标等）
+                    if client_w < 400 or client_h < 300:
+                        return True
+                    # 将客户区左上角 (0, 0) 转换为屏幕坐标
+                    client_left, client_top = win32gui.ClientToScreen(hwnd, (0, 0))
+                    candidates.append({
+                        "left": client_left,
+                        "top": client_top,
+                        "width": client_w,
+                        "height": client_h,
+                        "title": title,
+                        "hwnd": hwnd,
+                        "area": client_w * client_h,
+                        "exact_match": any(
+                            exact.lower() in lower_title
+                            for exact in ["Touhou Hero of Ice Fairy", "东方冰之勇者记"]
+                        ),
+                    })
+                    return True
             return True
 
         win32gui.EnumWindows(enum_callback, None)
-        return result
+
+        if not candidates:
+            return {}
+        # 优先精确匹配标题的窗口，否则选面积最大的
+        exact_matches = [c for c in candidates if c["exact_match"]]
+        if exact_matches:
+            return max(exact_matches, key=lambda x: x["area"])
+        return max(candidates, key=lambda x: x["area"])
 
     def _find_game_window_ctypes(self):
-        """使用 ctypes 备用方案查找游戏窗口（无需 pywin32）"""
+        """使用 ctypes 备用方案查找游戏窗口，返回精确的客户区屏幕坐标"""
         import ctypes
         from ctypes import wintypes
 
         user32 = ctypes.windll.user32
-        result = {}
+        candidates = []
+        # 标题黑名单：排除文件资源管理器、IDE 等常见非游戏窗口
+        title_blacklist = ["文件资源管理器", "explorer", "visual studio", "pycharm", "code", "cmd", "powershell"]
+        game_titles = [GAME_WINDOW["title"]] + GAME_WINDOW.get("fallback_titles", [])
 
         # 回调函数类型
         EnumWindowsProc = ctypes.WINFUNCTYPE(
@@ -69,9 +109,6 @@ class GameCapture:
         )
 
         def enum_callback(hwnd, lParam):
-            if result:
-                return True  # 已找到，继续枚举
-
             # 检查窗口是否可见
             if not user32.IsWindowVisible(hwnd):
                 return True
@@ -85,61 +122,188 @@ class GameCapture:
             user32.GetWindowTextW(hwnd, buffer, length + 1)
             title = buffer.value
 
-            for t in [GAME_WINDOW["title"]] + GAME_WINDOW["fallback_titles"]:
-                if t.lower() in title.lower():
-                    rect = wintypes.RECT()
-                    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                        result["left"] = rect.left
-                        result["top"] = rect.top
-                        result["width"] = rect.right - rect.left
-                        result["height"] = rect.bottom - rect.top
-                        result["title"] = title
-                        result["hwnd"] = hwnd
-                    return False
+            # 黑名单过滤
+            lower_title = title.lower()
+            if any(bad in lower_title for bad in title_blacklist):
+                return True
+
+            for t in game_titles:
+                if t.lower() in lower_title:
+                    # 获取客户区大小
+                    client_rect = wintypes.RECT()
+                    if user32.GetClientRect(hwnd, ctypes.byref(client_rect)):
+                        client_w = client_rect.right - client_rect.left
+                        client_h = client_rect.bottom - client_rect.top
+                        # 尺寸过滤：排除过小窗口（弹窗、任务栏图标等）
+                        if client_w < 400 or client_h < 300:
+                            return True
+                        # 将客户区左上角 (0, 0) 转换为屏幕坐标
+                        pt = wintypes.POINT(0, 0)
+                        user32.ClientToScreen(hwnd, ctypes.byref(pt))
+                        candidates.append({
+                            "left": pt.x,
+                            "top": pt.y,
+                            "width": client_w,
+                            "height": client_h,
+                            "title": title,
+                            "hwnd": hwnd,
+                            "area": client_w * client_h,
+                            "exact_match": any(
+                                exact.lower() in lower_title
+                                for exact in ["Touhou Hero of Ice Fairy", "东方冰之勇者记"]
+                            ),
+                        })
+                    return True
             return True
 
         callback = EnumWindowsProc(enum_callback)
         user32.EnumWindows(callback, 0)
-        return result
+
+        if not candidates:
+            return {}
+        # 优先精确匹配标题的窗口，否则选面积最大的
+        exact_matches = [c for c in candidates if c["exact_match"]]
+        if exact_matches:
+            return max(exact_matches, key=lambda x: x["area"])
+        return max(candidates, key=lambda x: x["area"])
+
+    @staticmethod
+    def _get_process_path(hwnd):
+        """通过窗口句柄获取进程可执行文件路径（ctypes 实现，不依赖 pywin32）"""
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+
+        # 获取进程 ID
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+
+        # 打开进程
+        PROCESS_QUERY_INFORMATION = 0x0400
+        PROCESS_VM_READ = 0x0010
+        h_process = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid.value)
+        if not h_process:
+            return None
+
+        # 获取进程路径
+        filename = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(1024)
+        success = kernel32.QueryFullProcessImageNameW(h_process, 0, filename, ctypes.byref(size))
+        kernel32.CloseHandle(h_process)
+
+        if success:
+            return filename.value
+        return None
+
+    @staticmethod
+    def _list_visible_windows():
+        """列出所有可见窗口标题（调试用）"""
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        windows = []
+
+        EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def enum_callback(hwnd, lParam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length == 0:
+                return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            title = buffer.value.strip()
+            if title:
+                windows.append(title)
+            return True
+
+        callback = EnumWindowsProc(enum_callback)
+        user32.EnumWindows(callback, 0)
+
+        print("\n[调试] 当前所有可见窗口标题（供排查）:")
+        print("-" * 60)
+        for i, title in enumerate(windows, 1):
+            print(f"  {i}. {title}")
+        print("-" * 60)
+        print("[提示] 如果以上列表中没有游戏窗口，请检查游戏是否已启动")
+        print("[提示] 如果游戏窗口标题与配置不符，请在 config.py 中修改 GAME_WINDOW['title']")
 
     def _find_game_window(self):
         """自动查找游戏窗口（优先 pywin32，失败则使用 ctypes 备用）"""
-        result = None
+        candidates = []
 
         # 尝试 pywin32
         try:
             result = self._find_game_window_pywin32()
             if result:
-                print("[信息] 使用 pywin32 找到游戏窗口")
+                candidates.append(result)
+                print("[信息] 使用 pywin32 找到候选窗口")
         except Exception as e:
             print(f"[信息] pywin32 检测失败: {e}")
 
         # 尝试 ctypes 备用方案
-        if not result:
-            try:
-                result = self._find_game_window_ctypes()
-                if result:
-                    print("[信息] 使用 ctypes 备用方案找到游戏窗口")
-            except Exception as e:
-                print(f"[信息] ctypes 备用方案也失败: {e}")
+        try:
+            result = self._find_game_window_ctypes()
+            if result:
+                # 避免与 pywin32 结果重复（同一窗口）
+                if not candidates or candidates[0].get("hwnd") != result.get("hwnd"):
+                    candidates.append(result)
+                    print("[信息] 使用 ctypes 备用方案找到候选窗口")
+        except Exception as e:
+            print(f"[信息] ctypes 备用方案失败: {e}")
 
-        if result:
-            print(f"[信息] 找到游戏窗口:")
-            print(f"  标题: {result['title']}")
-            print(f"  位置: ({result['left']}, {result['top']})")
-            print(f"  大小: {result['width']}x{result['height']}")
-            # 返回客户端区域（去掉标题栏和边框）
-            # 这里简单估算标题栏高度约30-40px
-            title_height = 40
-            return {
-                "left": result["left"],
-                "top": result["top"] + title_height,
-                "width": result["width"],
-                "height": result["height"] - title_height,
-            }
+        if not candidates:
+            self._list_visible_windows()
+            print("[错误] 无法自动检测游戏窗口")
+            return None
 
-        print("[错误] 无法自动检测游戏窗口")
-        return None
+        # 进程验证：检查窗口所属进程是否真的是游戏 exe
+        exe_name = GAME_WINDOW.get("exe_name", "Touhou Hero of Ice Fairy.exe")
+        verified_candidates = []
+        for c in candidates:
+            process_path = self._get_process_path(c["hwnd"])
+            if process_path:
+                if exe_name.lower() in process_path.lower():
+                    c["verified"] = True
+                    c["process_path"] = process_path
+                    verified_candidates.append(c)
+                else:
+                    c["verified"] = False
+                    c["process_path"] = process_path
+            else:
+                c["verified"] = False
+                c["process_path"] = None
+
+        # 选择策略：优先选进程验证通过的，其次精确标题匹配，最后面积最大
+        if verified_candidates:
+            result = max(verified_candidates, key=lambda x: x["area"])
+            print(f"[信息] 进程验证通过: {result['process_path']}")
+        else:
+            exact_matches = [c for c in candidates if c.get("exact_match")]
+            if exact_matches:
+                result = max(exact_matches, key=lambda x: x["area"])
+            else:
+                result = max(candidates, key=lambda x: x["area"])
+            if result.get("process_path"):
+                print(f"[警告] 窗口标题匹配但进程路径不符: {result['process_path']}")
+                print(f"[警告] 期望进程: {exe_name}")
+            else:
+                print("[信息] 无法验证进程路径，依赖标题匹配")
+
+        print(f"[信息] 找到游戏窗口:")
+        print(f"  标题: {result['title']}")
+        print(f"  客户区屏幕位置: ({result['left']}, {result['top']})")
+        print(f"  客户区大小: {result['width']}x{result['height']}")
+        return {
+            "left": result["left"],
+            "top": result["top"],
+            "width": result["width"],
+            "height": result["height"],
+        }
 
     def capture(self):
         """捕获游戏画面"""
@@ -149,6 +313,10 @@ class GameCapture:
         try:
             screenshot = self.sct.grab(self.region)
             img = np.array(screenshot)
+            # 验证截图尺寸
+            if img.size == 0 or img.shape[0] == 0 or img.shape[1] == 0:
+                print(f"[错误] 截图尺寸异常: shape={img.shape}, region={self.region}")
+                return None
             # BGRA -> BGR
             img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
             return img
@@ -210,6 +378,7 @@ class GameController:
             self.input_lib = "pydirectinput"
             self.pydirectinput = pydirectinput
             self.pydirectinput.FAILSAFE = False
+            self.pydirectinput.PAUSE = 0.0  # 禁用按键后的自动sleep，修复延迟
             print("[信息] 使用 pydirectinput 进行输入模拟")
         except ImportError:
             try:
@@ -217,6 +386,7 @@ class GameController:
                 self.input_lib = "pyautogui"
                 self.pyautogui = pyautogui
                 self.pyautogui.FAILSAFE = False
+                self.pyautogui.PAUSE = 0.0  # 禁用按键后的自动sleep
                 print("[信息] 使用 pyautogui 进行输入模拟")
             except ImportError:
                 print("[错误] 未安装 pydirectinput 或 pyautogui")
@@ -387,9 +557,10 @@ class StateExtractor:
     - 自动缩放检测阈值以适应不同窗口大小
     """
 
-    # 基准分辨率（阈值基于此分辨率标定）
-    BASE_WIDTH = 2560
-    BASE_HEIGHT = 1600
+    # 基准分辨率（阈值基于此分辨率标定，使用相对坐标自动适配）
+    # 参考UI检测报告: 1600×900 实际截图
+    BASE_WIDTH = 1600
+    BASE_HEIGHT = 900
 
     def __init__(self):
         self.prev_health = None
@@ -403,7 +574,6 @@ class StateExtractor:
     def _get_scale_factor(self, img):
         """计算当前图像相对于基准分辨率的缩放因子"""
         h, w = img.shape[:2]
-        area_scale = (w * h) / (self.BASE_WIDTH * self.BASE_HEIGHT)
         # 面积缩放是线性比例的平方，但UI元素通常是按宽度或高度线性缩放
         # 这里使用几何平均，使面积阈值更合理
         linear_scale = ((w / self.BASE_WIDTH) * (h / self.BASE_HEIGHT)) ** 0.5
@@ -422,6 +592,14 @@ class StateExtractor:
         """
         检测玩家血量（左上角雪花数量）
         返回: 当前雪花数 (0-6)
+
+        算法: 水平投影峰值计数法
+        1. HSV蓝色掩膜提取雪花区域
+        2. 闭运算填充雪花内部的白色边框/深蓝中心空洞
+        3. 垂直投影（每列蓝色像素求和）得到一维曲线
+        4. 检测曲线峰值的个数 = 雪花个数
+
+        优点: 不依赖轮廓分离，即使相邻雪花边缘粘连也能通过峰值区分
         """
         region = self._get_region(img, UI_DETECTION["health_snowflakes"])
         if region.size == 0:
@@ -429,32 +607,52 @@ class StateExtractor:
 
         scale = self._get_scale_factor(img)
 
-        # 转换到HSV颜色空间检测蓝色雪花
+        # HSV蓝色检测（覆盖浅蓝填充到深蓝中心）
         hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
-        # 蓝色范围 (根据雪花颜色调整)
-        lower_blue = np.array([90, 50, 150])
-        upper_blue = np.array([130, 255, 255])
+        lower_blue = np.array([95, 30, 50])
+        upper_blue = np.array([145, 255, 255])
         mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
-        # 形态学操作去除噪点
+        # 无蓝色像素 → 血量归零
+        if np.sum(mask > 0) < 10:
+            return 0
+
+        # 闭运算填充雪花内部孔洞（白色边框+深蓝中心造成空洞）
+        kernel = np.ones((5, 5), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        # 开运算去除零星噪点
         kernel = np.ones((3, 3), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
-        # 查找轮廓
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # 垂直投影：统计每列蓝色像素数
+        h, w = mask.shape
+        projection = np.sum(mask > 0, axis=0).astype(np.float32)
 
-        # 筛选符合雪花大小的轮廓（阈值根据分辨率自适应）
-        snowflakes = 0
-        min_area = int(15 * scale)
-        max_area = int(200 * scale)
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if min_area < area < max_area:
-                snowflakes += 1
+        # 高斯平滑投影曲线
+        ksize = max(3, int(5 * scale + 0.5) | 1)  # 保证奇数
+        projection = cv2.GaussianBlur(projection, (1, ksize), 0).flatten()
 
-        # 限制最大值为6
-        snowflakes = min(snowflakes, UI_DETECTION["health_snowflakes"]["max_health"])
-        return snowflakes
+        # 峰值检测
+        min_dist = max(15, int(25 * scale))  # 最小峰间距（防止同一雪花被多次计数）
+        peak_threshold = np.max(projection) * 0.25
+
+        peaks = []
+        i = 0
+        while i < w:
+            if projection[i] > peak_threshold:
+                peak_start = i
+                while i < w and projection[i] > peak_threshold:
+                    i += 1
+                peak_end = i
+                # 区间内找局部最大值位置
+                peak_pos = peak_start + int(np.argmax(projection[peak_start:peak_end]))
+                if not peaks or (peak_pos - peaks[-1]) > min_dist:
+                    peaks.append(peak_pos)
+            else:
+                i += 1
+
+        count = min(len(peaks), UI_DETECTION["health_snowflakes"]["max_health"])
+        return count
 
     def detect_stamina(self, img):
         """
@@ -496,10 +694,10 @@ class StateExtractor:
 
         # 转换到HSV检测红色
         hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
-        # 放宽红色范围以覆盖深红、暗红等不同色调
+        # 红色范围（Boss血条红色: H≈174~179, S≈136~255, V≈255）
         lower_red1 = np.array([0, 50, 40])
         upper_red1 = np.array([15, 255, 255])
-        lower_red2 = np.array([165, 50, 40])
+        lower_red2 = np.array([160, 50, 40])
         upper_red2 = np.array([180, 255, 255])
 
         mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
@@ -521,36 +719,55 @@ class StateExtractor:
         # 但此处直接返回检测到的红色列占比
         return min(max(ratio, 0.0), 1.0)
 
-    def detect_boss_stage(self, img):
+    def detect_boss_stage(self, img, prev_boss_health=None, current_boss_health=None):
         """
         检测Boss阶段（Stage X/6）
-        返回: 当前阶段 (1-6) 或 None
-        简化实现：基于右上角文字区域的颜色/亮度变化
+        返回: 当前阶段 (1-6) 或 None（非Boss战或无文字区域）
+
+        检测策略:
+        1. 亮红色文字检测: Stage X/6 文字为 RGB≈(231,3,45)，通过HSV红色范围识别
+        2. 白色文字检测: Boss名称和技能名称为白色，灰度二值化识别
+        3. HP启发式: Boss血量突降+恢复判定阶段转换
         """
         region = self._get_region(img, UI_DETECTION["boss_stage"])
         if region.size == 0:
             return None
 
-        # 将区域转为灰度，检测白色文字
-        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-        # 二值化检测亮文字
-        _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        # ---- 文字存在性检测 ----
 
-        # 检测是否有足够的白色像素（有文字存在）
-        white_ratio = np.sum(binary > 0) / binary.size
-        if white_ratio < 0.01:
+        # 1. 红色文字检测（Stage X/6 文字）
+        hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+        lower_red1 = np.array([0, 80, 80])
+        upper_red1 = np.array([15, 255, 255])
+        lower_red2 = np.array([160, 80, 80])
+        upper_red2 = np.array([180, 255, 255])
+        red_mask = cv2.inRange(hsv, lower_red1, upper_red1) | cv2.inRange(hsv, lower_red2, upper_red2)
+        has_red_text = np.sum(red_mask > 0) > 30
+
+        # 2. 白色文字检测（Boss名称和技能名称）
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+        _, white_binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        white_ratio = np.sum(white_binary > 0) / white_binary.size
+        has_white_text = white_ratio > 0.01
+
+        # 既没有红色文字也没有白色文字 → 非Boss战或无UI
+        if not (has_red_text or has_white_text):
             return None
 
-        # 简化的阶段检测：基于Boss血条突降判断阶段转换
-        # 实际阶段数通过历史血量推断
-        if self.prev_boss_health is not None and len(self.boss_health_history) > 5:
-            # 如果Boss血量从很低突然恢复到很高，说明进入了新阶段
-            avg_recent = np.mean(self.boss_health_history[-5:])
-            if avg_recent < 0.1 and self.prev_boss_health > 0.8:
+        # ---- 阶段值推断 ----
+
+        # Boss已击败且无文字 → 返回上一阶段（由调用方处理结束）
+        if current_boss_health is not None and current_boss_health <= 0.01 and not has_red_text:
+            return self.prev_boss_stage
+
+        # HP启发式：Boss血量突降+恢复 → 阶段转换
+        if prev_boss_health is not None and len(self.boss_health_history) >= 5:
+            recent_low = np.min(self.boss_health_history[-5:])
+            if recent_low < 0.1 and prev_boss_health > 0.8:
                 if self.prev_boss_stage is not None:
                     return min(self.prev_boss_stage + 1, 6)
 
-        # 默认返回之前检测到的阶段或1
+        # 默认：有Boss但未检测到阶段变化 → 返回之前阶段或1
         return self.prev_boss_stage if self.prev_boss_stage is not None else 1
 
     def detect_spells_ready(self, img):
@@ -566,8 +783,9 @@ class StateExtractor:
 
         # 检测READY文字（黄色/金色/橙色）
         hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
-        # 放宽范围以覆盖不同亮度下的READY文字
-        lower_ready = np.array([10, 50, 80])
+        # READY文字RGB≈(255,240,224), 在HSV中S≈31（饱和度低）
+        # 降低饱和度阈值以捕获浅黄色文字
+        lower_ready = np.array([10, 20, 80])
         upper_ready = np.array([50, 255, 255])
         mask = cv2.inRange(hsv, lower_ready, upper_ready)
 
@@ -625,19 +843,23 @@ class StateExtractor:
                 state["stamina"] = stamina
                 self.prev_stamina = stamina
 
-            # 检测Boss血量
+            # 检测Boss血量（先检测，后更新 prev，供阶段检测使用上一帧的值）
             boss_health = self.detect_boss_health(img)
             if boss_health is not None:
                 state["boss_health"] = boss_health
                 if self.prev_boss_health is not None:
                     state["boss_health_changed"] = self.prev_boss_health - boss_health
-                self.prev_boss_health = boss_health
                 self.boss_health_history.append(boss_health)
                 if len(self.boss_health_history) > 30:
                     self.boss_health_history.pop(0)
 
-            # 检测Boss阶段
-            boss_stage = self.detect_boss_stage(img)
+            # 检测Boss阶段（在更新 prev_boss_health 之前调用，使条件判断使用上帧值）
+            prev_boss_hp = self.prev_boss_health  # 保存上一帧血量用于阶段检测
+            boss_stage = self.detect_boss_stage(img, prev_boss_hp, current_boss_health=boss_health)
+
+            # 更新 prev_boss_health（放在阶段检测之后）
+            if boss_health is not None:
+                self.prev_boss_health = boss_health
             if boss_stage is not None:
                 state["boss_stage"] = boss_stage
                 if self.prev_boss_stage is not None:
@@ -676,7 +898,7 @@ def test_capture():
     print("="*60)
     print("游戏: 东方冰之勇者记 (Touhou Hero of Ice Fairy)")
     print("可执行文件: Touhou Hero of Ice Fairy.exe")
-    print()
+    print("="*60)
     print("按 Ctrl+C 停止测试")
     print("按 S 保存当前截图")
     print("按 D 显示检测到的状态信息")
@@ -695,7 +917,7 @@ def test_capture():
     # 创建可调整大小的窗口，初始尺寸设为 1280x800
     window_name = "Game Capture Test"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_name, 1280, 800)
+    cv2.resizeWindow(window_name, 510, 360)
 
     try:
         while True:

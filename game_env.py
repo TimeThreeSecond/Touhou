@@ -12,6 +12,7 @@
 """
 import time
 import numpy as np
+import cv2
 import gymnasium as gym
 from gymnasium import spaces
 
@@ -81,6 +82,8 @@ class TouhouEnv(gym.Env):
         # 游戏状态
         self.episode_steps = 0
         self.max_steps = 10000
+        self.max_length = 5400  # 3分钟 = 180秒 × 30fps，超过后停止操作防止挂机
+        self.done_reason = None  # 记录结束原因：death / boss_kill / max_steps
         self.total_reward = 0.0
         self.done = False
 
@@ -232,23 +235,49 @@ class TouhouEnv(gym.Env):
         3. 达到最大步数
         """
         if state_info is None:
+            self.done_reason = None
             return False
 
         # 玩家死亡
         if not state_info["is_alive"]:
+            self.done_reason = "death"
             return True
 
         # Boss被彻底击败（Stage 6且血量接近0）
         if (state_info["boss_stage"] == 6 and
             state_info["boss_health"] is not None and
             state_info["boss_health"] <= 0.01):
+            self.done_reason = "boss_kill"
             return True
 
         # 达到最大步数
         if self.episode_steps >= self.max_steps:
+            self.done_reason = "max_steps"
             return True
 
+        self.done_reason = None
         return False
+
+    def _get_structured_obs(self, state_info=None):
+        """构建结构化状态向量 (6维): [health/6, stamina, boss_health, boss_stage/6, spell_left, spell_right]"""
+        if state_info is None:
+            if self.last_raw_frame is None:
+                return np.zeros(6, dtype=np.float32)
+            state_info = self.extractor.extract(self.last_raw_frame)
+
+        health = state_info.get("health")
+        stamina = state_info.get("stamina")
+        boss_health = state_info.get("boss_health")
+        boss_stage = state_info.get("boss_stage")
+
+        return np.array([
+            (health / 6.0) if health is not None else 0.0,
+            stamina if stamina is not None else 0.0,
+            boss_health if boss_health is not None else 0.0,
+            (boss_stage / 6.0) if boss_stage is not None else (1.0 / 6.0),
+            float(state_info.get("spell_left_ready", False)),
+            float(state_info.get("spell_right_ready", False)),
+        ], dtype=np.float32)
 
     def reset(self, seed=None, options=None):
         """重置环境"""
@@ -266,19 +295,38 @@ class TouhouEnv(gym.Env):
         self.done = False
         self.prev_state_info = None
 
+        # 等待游戏准备（死亡后等待渐黑画面过渡）
+        if self.done_reason == "death":
+            time.sleep(1.0)
+        else:
+            time.sleep(0.5)
+
+        # 动态检测：循环截图直到血量出现，确认游戏已回到战斗状态
+        # 防止黑屏/结算画面期间开始新一局导致立即误判死亡
+        max_wait = 90  # 最多等 90 次截图（约 3 秒 @ 30fps）
+        for i in range(max_wait):
+            raw = self.capture.capture()
+            if raw is not None:
+                health = self.extractor.detect_health(raw)
+                if health is not None and health > 0:
+                    break  # 血量出现了，游戏已恢复
+            time.sleep(0.033)
+        else:
+            print(f"[警告] reset() 等待血量恢复超时({max_wait}次), 游戏可能仍在黑屏/结算画面")
+
+        self.done_reason = None
+
         # 初始化帧堆叠
         obs = self._get_observation()
         self.frame_stack = np.repeat(obs, self.frame_stack_size, axis=0)
-
-        # 等待游戏准备
-        time.sleep(0.5)
+        structured = self._get_structured_obs()
 
         info = {
             "game": "Touhou Hero of Ice Fairy",
             "exe": "Touhou Hero of Ice Fairy.exe",
             "action_space_size": self.action_size,
         }
-        return self.frame_stack, info
+        return (self.frame_stack, structured), info
 
     def step(self, action):
         """执行一步"""
@@ -287,8 +335,11 @@ class TouhouEnv(gym.Env):
         # 解码动作
         action_dict = self._action_to_dict(action)
 
-        # 执行动作
-        self.controller.execute_action(action_dict)
+        # 超过 max_length 后停止任何操作，等待死亡以防止挂机
+        if self.episode_steps >= self.max_length:
+            self.controller.reset()
+        else:
+            self.controller.execute_action(action_dict)
 
         # 等待一帧
         time.sleep(self.frame_time)
@@ -302,6 +353,7 @@ class TouhouEnv(gym.Env):
 
         # 提取游戏状态
         state_info = self.extractor.extract(self.last_raw_frame)
+        structured = self._get_structured_obs(state_info)
 
         # 计算奖励
         reward = self._get_reward(state_info, action_dict)
@@ -318,7 +370,7 @@ class TouhouEnv(gym.Env):
             "state_info": state_info,
         }
 
-        return self.frame_stack, reward, terminated, truncated, info
+        return (self.frame_stack, structured), reward, terminated, truncated, info
 
     def render(self):
         """渲染"""
@@ -362,29 +414,6 @@ class TouhouEnv(gym.Env):
         if self.render_mode == "human":
             import cv2
             cv2.destroyAllWindows()
-
-
-class TouhouEnvSimple(TouhouEnv):
-    """
-    简化版环境 - 使用更简单的观察空间（适合快速测试）
-    """
-
-    def __init__(self, render_mode=None, fps=30):
-        super().__init__(render_mode, fps)
-
-        self.observation_space = spaces.Box(
-            low=0.0, high=1.0,
-            shape=(self.frame_stack_size * (1 if VISION["grayscale"] else 3),
-                   VISION["resize_height"], VISION["resize_width"]),
-            dtype=np.float32
-        )
-
-    def reset(self, seed=None, options=None):
-        obs, info = super().reset(seed, options)
-        return self.frame_stack, info
-
-    def step(self, action):
-        return super().step(action)
 
 
 if __name__ == '__main__':

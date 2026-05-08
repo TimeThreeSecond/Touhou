@@ -84,9 +84,10 @@ class ValueNetwork(nn.Module):
 class PPOAgent:
     """PPO Agent"""
     
-    def __init__(self, observation_shape, action_size, device=None):
+    def __init__(self, observation_shape, action_size, device=None, structured_dim=6):
         self.observation_shape = observation_shape
         self.action_size = action_size
+        self.structured_dim = structured_dim
         
         if device is None or device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -95,13 +96,23 @@ class PPOAgent:
         
         print(f"使用设备: {self.device}")
         
-        input_channels = observation_shape[0] if len(observation_shape) == 3 else 1
-        height = observation_shape[-2] if len(observation_shape) >= 2 else 84
-        width = observation_shape[-1] if len(observation_shape) >= 2 else 84
+        # 解析观察空间：支持纯视觉 (C,H,W) 或多模态 ((C,H,W), structured_dim)
+        if isinstance(observation_shape, (list, tuple)) and len(observation_shape) == 2:
+            visual_shape = observation_shape[0]
+            self.structured_dim = observation_shape[1] if isinstance(observation_shape[1], int) else observation_shape[1][0]
+        else:
+            visual_shape = observation_shape
+        
+        input_channels = visual_shape[0] if len(visual_shape) == 3 else 1
+        height = visual_shape[-2] if len(visual_shape) >= 2 else 84
+        width = visual_shape[-1] if len(visual_shape) >= 2 else 84
         
         self.feature_extractor = CNNFeatureExtractor(input_channels, height, width).to(self.device)
-        self.policy = PolicyNetwork(self.feature_extractor.feature_size, action_size).to(self.device)
-        self.value = ValueNetwork(self.feature_extractor.feature_size).to(self.device)
+        
+        # 拼接视觉特征与结构化状态后的维度
+        combined_feature_size = self.feature_extractor.feature_size + self.structured_dim
+        self.policy = PolicyNetwork(combined_feature_size, action_size).to(self.device)
+        self.value = ValueNetwork(combined_feature_size).to(self.device)
         
         self.optimizer = torch.optim.Adam(
             list(self.feature_extractor.parameters()) + 
@@ -120,11 +131,28 @@ class PPOAgent:
     
     def select_action(self, observation, deterministic=False):
         with torch.no_grad():
-            obs_tensor = torch.FloatTensor(observation).unsqueeze(0).to(self.device)
-            features = self.feature_extractor(obs_tensor)
-            features = features.view(features.size(0), -1)
+            # 解包多模态观察
+            if isinstance(observation, tuple):
+                visual_obs, structured_obs = observation
+            else:
+                visual_obs = observation
+                structured_obs = np.zeros(self.structured_dim, dtype=np.float32)
+            
+            if not isinstance(structured_obs, np.ndarray):
+                structured_obs = np.array(structured_obs, dtype=np.float32)
+            
+            visual_tensor = torch.FloatTensor(visual_obs).unsqueeze(0).to(self.device)
+            structured_tensor = torch.FloatTensor(structured_obs).unsqueeze(0).to(self.device)
+            
+            visual_features = self.feature_extractor(visual_tensor)
+            visual_features = visual_features.view(visual_features.size(0), -1)
+            
+            # 拼接视觉特征与结构化状态
+            features = torch.cat([visual_features, structured_tensor], dim=-1)
+            
             action, log_prob, probs = self.policy.get_action(features, deterministic)
             value = self.value(features)
+            
             return {
                 "action": action.cpu().numpy()[0],
                 "log_prob": log_prob.cpu().numpy()[0],
@@ -143,7 +171,14 @@ class PPOAgent:
         return np.array(advantages)
     
     def update(self, rollout_data):
-        observations = torch.FloatTensor(rollout_data["observations"]).to(self.device)
+        # 解包多模态观察
+        if isinstance(rollout_data["observations"], tuple):
+            visual_obs = torch.FloatTensor(rollout_data["observations"][0]).to(self.device)
+            structured_obs = torch.FloatTensor(rollout_data["observations"][1]).to(self.device)
+        else:
+            visual_obs = torch.FloatTensor(rollout_data["observations"]).to(self.device)
+            structured_obs = torch.zeros((len(visual_obs), self.structured_dim), device=self.device)
+        
         actions = torch.LongTensor(rollout_data["actions"]).to(self.device)
         old_log_probs = torch.FloatTensor(rollout_data["old_log_probs"]).to(self.device)
         
@@ -154,7 +189,7 @@ class PPOAgent:
         returns = torch.FloatTensor(returns).to(self.device)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
         
-        dataset_size = len(observations)
+        dataset_size = len(visual_obs)
         indices = np.arange(dataset_size)
         
         for epoch in range(4):
@@ -163,14 +198,18 @@ class PPOAgent:
                 end = start + TRAIN["batch_size"]
                 batch_idx = indices[start:end]
                 
-                batch_obs = observations[batch_idx]
+                batch_visual = visual_obs[batch_idx]
+                batch_structured = structured_obs[batch_idx]
                 batch_actions = actions[batch_idx]
                 batch_old_log_probs = old_log_probs[batch_idx]
                 batch_advantages = advantages[batch_idx]
                 batch_returns = returns[batch_idx]
                 
-                features = self.feature_extractor(batch_obs)
-                features = features.view(features.size(0), -1)
+                visual_features = self.feature_extractor(batch_visual)
+                visual_features = visual_features.view(visual_features.size(0), -1)
+                
+                # 拼接视觉特征与结构化状态
+                features = torch.cat([visual_features, batch_structured], dim=-1)
                 
                 logits = self.policy(features)
                 probs = F.softmax(logits, dim=-1)
@@ -221,5 +260,8 @@ class PPOAgent:
 
 if __name__ == '__main__':
     print("测试Agent...")
-    agent = PPOAgent((4, 84, 84), 36)
+    agent = PPOAgent(((4, 180, 320), 6), 288)
+    obs = (np.zeros((4, 180, 320), dtype=np.float32), np.zeros(6, dtype=np.float32))
+    result = agent.select_action(obs)
+    print(f"动作: {result['action']}, 价值: {result['value']:.4f}")
     print("Agent创建成功")

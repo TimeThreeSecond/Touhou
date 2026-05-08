@@ -5,14 +5,17 @@ import time
 import argparse
 from pathlib import Path
 
+from config import MODEL_DIR
 from game_env import TouhouEnv
 from agent import PPOAgent
 
 
-def play(model_path="models/best.pt", render=True, fps=30):
+def play(model_path=None, render=True, fps=30):
     """
     使用训练好的模型运行游戏
     """
+    if model_path is None:
+        model_path = str(MODEL_DIR / "best.pt")
     print(f"加载模型: {model_path}")
     
     # 创建环境
@@ -22,11 +25,15 @@ def play(model_path="models/best.pt", render=True, fps=30):
     # 创建Agent
     obs_shape = env.observation_space.shape
     action_size = env.action_space.n
-    agent = PPOAgent(obs_shape, action_size)
+    agent = PPOAgent((obs_shape, 6), action_size)
     
     # 加载模型
     if Path(model_path).exists():
-        agent.load(model_path)
+        try:
+            agent.load(model_path)
+        except Exception as e:
+            print(f"[警告] 模型加载失败: {e}")
+            print("将使用随机策略运行")
     else:
         print(f"[警告] 模型文件不存在: {model_path}")
         print("将使用随机策略运行")
@@ -63,8 +70,8 @@ def play(model_path="models/best.pt", render=True, fps=30):
 
 def main():
     parser = argparse.ArgumentParser(description="运行训练好的Agent")
-    parser.add_argument("--model", type=str, default="models/best.pt",
-                       help="模型路径")
+    parser.add_argument("--model", type=str, default=None,
+                       help="模型路径（默认: MODEL_DIR/best.pt）")
     parser.add_argument("--no-render", action="store_true",
                        help="不显示画面")
     parser.add_argument("--fps", type=int, default=30,

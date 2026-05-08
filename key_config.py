@@ -7,7 +7,7 @@ import json
 import time
 from pathlib import Path
 
-from config import DEFAULT_KEY_MAPPING, save_key_mapping, CONFIG_FILE
+from config import DEFAULT_KEY_MAPPING, save_key_mapping, CONFIG_FILE, GAME_WINDOW
 
 
 def show_current_config():
@@ -117,38 +117,68 @@ def interactive_config():
 
 
 def _detect_game_window_pywin32():
-    """使用 pywin32 检测游戏窗口"""
+    """使用 pywin32 检测游戏窗口，返回精确的客户区屏幕坐标"""
     import win32gui
 
-    game_titles = ["Touhou Hero of Ice Fairy", "东方冰之勇者记", "Touhou"]
-    found_windows = []
+    candidates = []
+    # 标题黑名单：排除文件资源管理器、IDE 等常见非游戏窗口
+    title_blacklist = ["文件资源管理器", "explorer", "visual studio", "pycharm", "code", "cmd", "powershell"]
+    game_titles = ["Touhou Hero of Ice Fairy", "东方冰之勇者记"]
 
     def enum_callback(hwnd, extra):
-        if win32gui.IsWindowVisible(hwnd):
-            title = win32gui.GetWindowText(hwnd)
-            for game_title in game_titles:
-                if game_title.lower() in title.lower():
-                    rect = win32gui.GetWindowRect(hwnd)
-                    found_windows.append({
-                        "title": title,
-                        "hwnd": hwnd,
-                        "rect": rect,
-                        "width": rect[2] - rect[0],
-                        "height": rect[3] - rect[1],
-                    })
+        if not win32gui.IsWindowVisible(hwnd):
+            return True
+        title = win32gui.GetWindowText(hwnd)
+        lower_title = title.lower()
+        # 黑名单过滤
+        if any(bad in lower_title for bad in title_blacklist):
+            return True
+        for game_title in game_titles:
+            if game_title.lower() in lower_title:
+                # 获取客户区大小
+                client_rect = win32gui.GetClientRect(hwnd)
+                client_w = client_rect[2] - client_rect[0]
+                client_h = client_rect[3] - client_rect[1]
+                # 尺寸过滤：排除过小窗口
+                if client_w < 400 or client_h < 300:
+                    return True
+                # 将客户区左上角 (0, 0) 转换为屏幕坐标
+                client_left, client_top = win32gui.ClientToScreen(hwnd, (0, 0))
+                candidates.append({
+                    "title": title,
+                    "hwnd": hwnd,
+                    "rect": (client_left, client_top, client_left + client_w, client_top + client_h),
+                    "width": client_w,
+                    "height": client_h,
+                    "area": client_w * client_h,
+                    "exact_match": any(
+                        exact.lower() in lower_title
+                        for exact in ["Touhou Hero of Ice Fairy", "东方冰之勇者记"]
+                    ),
+                })
+                return True
+        return True
 
     win32gui.EnumWindows(enum_callback, None)
-    return found_windows
+    # 优先精确匹配标题的窗口，否则选面积最大的
+    exact_matches = [c for c in candidates if c["exact_match"]]
+    if exact_matches:
+        return [max(exact_matches, key=lambda x: x["area"])]
+    if candidates:
+        return [max(candidates, key=lambda x: x["area"])]
+    return []
 
 
 def _detect_game_window_ctypes():
-    """使用 ctypes 备用方案检测游戏窗口（无需 pywin32）"""
+    """使用 ctypes 备用方案检测游戏窗口，返回精确的客户区屏幕坐标"""
     import ctypes
     from ctypes import wintypes
 
     user32 = ctypes.windll.user32
-    game_titles = ["Touhou Hero of Ice Fairy", "东方冰之勇者记", "Touhou"]
-    found_windows = []
+    candidates = []
+    # 标题黑名单：排除文件资源管理器、IDE 等常见非游戏窗口
+    title_blacklist = ["文件资源管理器", "explorer", "visual studio", "pycharm", "code", "cmd", "powershell"]
+    game_titles = ["Touhou Hero of Ice Fairy", "东方冰之勇者记"]
 
     EnumWindowsProc = ctypes.WINFUNCTYPE(
         wintypes.BOOL,
@@ -170,27 +200,115 @@ def _detect_game_window_ctypes():
         user32.GetWindowTextW(hwnd, buffer, length + 1)
         title = buffer.value
 
+        # 黑名单过滤
+        lower_title = title.lower()
+        if any(bad in lower_title for bad in title_blacklist):
+            return True
+
         for game_title in game_titles:
-            if game_title.lower() in title.lower():
-                rect = wintypes.RECT()
-                if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                    found_windows.append({
+            if game_title.lower() in lower_title:
+                # 获取客户区大小
+                client_rect = wintypes.RECT()
+                if user32.GetClientRect(hwnd, ctypes.byref(client_rect)):
+                    client_w = client_rect.right - client_rect.left
+                    client_h = client_rect.bottom - client_rect.top
+                    # 尺寸过滤：排除过小窗口
+                    if client_w < 400 or client_h < 300:
+                        return True
+                    # 将客户区左上角 (0, 0) 转换为屏幕坐标
+                    pt = wintypes.POINT(0, 0)
+                    user32.ClientToScreen(hwnd, ctypes.byref(pt))
+                    candidates.append({
                         "title": title,
                         "hwnd": hwnd,
-                        "rect": (rect.left, rect.top, rect.right, rect.bottom),
-                        "width": rect.right - rect.left,
-                        "height": rect.bottom - rect.top,
+                        "rect": (pt.x, pt.y, pt.x + client_w, pt.y + client_h),
+                        "width": client_w,
+                        "height": client_h,
+                        "area": client_w * client_h,
+                        "exact_match": any(
+                            exact.lower() in lower_title
+                            for exact in ["Touhou Hero of Ice Fairy", "东方冰之勇者记"]
+                        ),
                     })
-                return False
+                return True
         return True
 
     callback = EnumWindowsProc(enum_callback)
     user32.EnumWindows(callback, 0)
-    return found_windows
+
+    # 优先精确匹配标题的窗口，否则选面积最大的
+    exact_matches = [c for c in candidates if c["exact_match"]]
+    if exact_matches:
+        return [max(exact_matches, key=lambda x: x["area"])]
+    if candidates:
+        return [max(candidates, key=lambda x: x["area"])]
+    return []
+
+
+def _get_process_path(hwnd):
+    """通过窗口句柄获取进程可执行文件路径（ctypes 实现）"""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.windll.user32
+
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+
+    PROCESS_QUERY_INFORMATION = 0x0400
+    PROCESS_VM_READ = 0x0010
+    h_process = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid.value)
+    if not h_process:
+        return None
+
+    filename = ctypes.create_unicode_buffer(1024)
+    size = wintypes.DWORD(1024)
+    success = kernel32.QueryFullProcessImageNameW(h_process, 0, filename, ctypes.byref(size))
+    kernel32.CloseHandle(h_process)
+
+    if success:
+        return filename.value
+    return None
+
+
+def _list_visible_windows():
+    """列出所有可见窗口标题（调试用）"""
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    windows = []
+
+    EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def enum_callback(hwnd, lParam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        title = buffer.value.strip()
+        if title:
+            windows.append(title)
+        return True
+
+    callback = EnumWindowsProc(enum_callback)
+    user32.EnumWindows(callback, 0)
+
+    print("\n[调试] 当前所有可见窗口标题（供排查）:")
+    print("-" * 60)
+    for i, title in enumerate(windows, 1):
+        print(f"  {i}. {title}")
+    print("-" * 60)
+    print("[提示] 如果以上列表中没有游戏窗口，请检查游戏是否已启动")
+    print("[提示] 如果游戏窗口标题与配置不符，请在 config.py 中修改 GAME_WINDOW['title']")
 
 
 def detect_game_window():
-    """检测游戏窗口（优先 pywin32，失败则使用 ctypes 备用）"""
+    """检测游戏窗口（优先 pywin32，失败则使用 ctypes 备用），含进程验证"""
     print("="*60)
     print("游戏窗口检测")
     print("="*60)
@@ -199,54 +317,84 @@ def detect_game_window():
     print("请确保游戏正在运行")
     print()
 
-    found_windows = []
+    candidates = []
 
     # 尝试 pywin32
     try:
-        found_windows = _detect_game_window_pywin32()
-        if found_windows:
-            print("[信息] 使用 pywin32 检测到窗口")
+        pywin32_windows = _detect_game_window_pywin32()
+        if pywin32_windows:
+            candidates.extend(pywin32_windows)
+            print("[信息] 使用 pywin32 检测到候选窗口")
     except Exception as e:
         print(f"[信息] pywin32 检测失败: {e}")
 
     # 尝试 ctypes 备用方案
-    if not found_windows:
-        try:
-            found_windows = _detect_game_window_ctypes()
-            if found_windows:
-                print("[信息] 使用 ctypes 备用方案检测到窗口")
-        except Exception as e:
-            print(f"[信息] ctypes 备用方案也失败: {e}")
+    try:
+        ctypes_windows = _detect_game_window_ctypes()
+        if ctypes_windows:
+            # 去重：避免同一窗口被两个分支都加入
+            existing_hwnds = {c["hwnd"] for c in candidates}
+            for w in ctypes_windows:
+                if w["hwnd"] not in existing_hwnds:
+                    candidates.append(w)
+            if candidates:
+                print("[信息] 使用 ctypes 备用方案检测到候选窗口")
+    except Exception as e:
+        print(f"[信息] ctypes 备用方案失败: {e}")
 
-    if found_windows:
-        print(f"找到 {len(found_windows)} 个游戏窗口:")
-        for i, win in enumerate(found_windows):
-            print(f"\n窗口 {i+1}:")
-            print(f"  标题: {win['title']}")
-            print(f"  位置: ({win['rect'][0]}, {win['rect'][1]})")
-            print(f"  大小: {win['width']}x{win['height']}")
-            print(f"  句柄: {win['hwnd']}")
-
-        print()
-        print("建议的截图区域配置:")
-        print("  请在 config.py 中设置 GAME_WINDOW['region']")
-        for win in found_windows:
-            print(f"\n  窗口: {win['title']}")
-            print(f"  region = {{")
-            print(f"      'left': {win['rect'][0]},")
-            print(f"      'top': {win['rect'][1]},")
-            print(f"      'width': {win['width']},")
-            print(f"      'height': {win['height']}")
-            print(f"  }}")
-    else:
+    if not candidates:
+        _list_visible_windows()
         print("未找到游戏窗口！")
         print("请确保游戏已启动")
         print()
-        print("可能的游戏窗口标题:")
-        print("  - Touhou Hero of Ice Fairy")
-        print("  - 东方冰之勇者记")
-        print()
         print("如仍无法检测，请手动在 config.py 中设置 GAME_WINDOW['region']")
+        return
+
+    # 进程验证
+    exe_name = GAME_WINDOW.get("exe_name", "Touhou Hero of Ice Fairy.exe")
+    verified = []
+    for c in candidates:
+        path = _get_process_path(c["hwnd"])
+        if path and exe_name.lower() in path.lower():
+            c["verified"] = True
+            c["process_path"] = path
+            verified.append(c)
+        else:
+            c["verified"] = False
+            c["process_path"] = path
+
+    # 选择策略：优先进程验证通过的，其次精确标题匹配，最后面积最大
+    if verified:
+        win = max(verified, key=lambda x: x["area"])
+        print(f"[信息] 进程验证通过: {win['process_path']}")
+    else:
+        exact = [c for c in candidates if c.get("exact_match")]
+        if exact:
+            win = max(exact, key=lambda x: x["area"])
+        else:
+            win = max(candidates, key=lambda x: x["area"])
+        if win.get("process_path"):
+            print(f"[警告] 窗口标题匹配但进程路径不符: {win['process_path']}")
+            print(f"[警告] 期望进程: {exe_name}")
+        else:
+            print("[信息] 无法验证进程路径，依赖标题匹配")
+
+    print(f"\n找到游戏窗口:")
+    print(f"  标题: {win['title']}")
+    print(f"  位置: ({win['rect'][0]}, {win['rect'][1]})")
+    print(f"  大小: {win['width']}x{win['height']}")
+    print(f"  句柄: {win['hwnd']}")
+
+    print()
+    print("建议的截图区域配置:")
+    print("  请在 config.py 中设置 GAME_WINDOW['region']")
+    print(f"\n  窗口: {win['title']}")
+    print(f"  region = {{")
+    print(f"      'left': {win['rect'][0]},")
+    print(f"      'top': {win['rect'][1]},")
+    print(f"      'width': {win['width']},")
+    print(f"      'height': {win['height']}")
+    print(f"  }}")
 
 
 def test_keys():

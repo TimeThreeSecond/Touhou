@@ -100,14 +100,14 @@ def main():
         'opencv-python': 'cv2',
         'mss': 'mss',
         'gymnasium': 'gymnasium',
-        'pyautogui': 'pyautogui',
         'pydirectinput': 'pydirectinput',
     }
-    
+
     optional_packages = {
         'tensorboard': 'tensorboard',
         'matplotlib': 'matplotlib',
         'PIL': 'PIL',
+        'pyautogui': 'pyautogui',  # pydirectinput 的备选，二选一即可
     }
     
     print("检查必要依赖:")
